@@ -1,132 +1,156 @@
-
 module QuadGKEnzymeExt
 
 using QuadGK, Enzyme, LinearAlgebra
+using .EnzymeRules: needs_primal, needs_shadow, AugmentedReturn, VectorSpace
 
-function Enzyme.EnzymeRules.augmented_primal(config, ofunc::Const{typeof(quadgk)}, ::Type{RT}, f, segs::Annotation{T}...; kws...) where {RT, T}
-    prims = map(x->x.val, segs)
+function EnzymeRules.augmented_primal(
+    config::C, ::Const{typeof(quadgk)}, ::Type{RT}, f::F, segs::Vararg{Annotation{T},N}; kws...
+) where {C,RT,F,T,N}
+    segvals = ntuple(i -> (@inline; segs[i].val), Val(N))
 
-    retres, segbuf = if f isa Const
-        if EnzymeRules.needs_primal(config)
-            quadgk(f.val, prims...; kws...), nothing
+    # res may hold the primal even if needs_primal(config) == false, for constructing shadow
+    primal, eval_segbuf = if f isa Const
+        res = if needs_primal(config)
+            quadgk(f.val, segvals...; kws...)
         else
             nothing
         end
+        res, nothing
     else
-        I, E, segbuf = quadgk_segbuf(f.val, prims...; kws...)
-        if EnzymeRules.needs_primal(config)
-            (I, E), segbuf
+        res..., eval_segbuf = quadgk_segbuf(f.val, segvals...; kws...)
+        if needs_primal(config)
+            res, eval_segbuf
         else
-            nothing, segbuf
+            nothing, eval_segbuf
         end
     end
 
-    dres = if !Enzyme.EnzymeRules.needs_shadow(config)
+    shadow = if !needs_shadow(config)
         nothing
-    elseif EnzymeRules.width(config) == 1
-        zero.(res...)
     else
-        ntuple(Val(EnzymeRules.width(config))) do i
-            Base.@_inline_meta
-            zero.(res...)
+        # source such that shadow will comprise one or more copies of make_zero(source)
+        source = if isnothing(res)
+            a, b = segvals[1], segvals[2]
+            f.val((a + b) / 2) * (b - a)
+        else
+            first(res)  # I
+        end
+        W = EnzymeRules.width(config)
+        if W == 1
+            make_zero(source; runtime_inactive=Val(false))
+        else
+            ntuple(Val(W)) do _
+                @inline
+                make_zero(source; runtime_inactive=Val(false))
+            end
         end
     end
 
-    cache = if RT <: Duplicated || RT <: DuplicatedNoNeed || RT <: BatchDuplicated || RT <: BatchDuplicatedNoNeed
-        dres
+    tape = if RT <: Active
+        (eval_segbuf, nothing)
     else
-        nothing
+        (eval_segbuf, shadow)
     end
-    cache2 = segbuf, cache
 
-    return Enzyme.EnzymeRules.AugmentedReturn{
-        Enzyme.EnzymeRules.needs_primal(config) ? eltype(RT) : Nothing,
-        Enzyme.EnzymeRules.needs_shadow(config) ? (Enzyme.EnzymeRules.width(config) == 1 ? eltype(RT) : NTuple{Enzyme.EnzymeRules.width(config), eltype(RT)}) : Nothing,
-        typeof(cache2)
-    }(retres, dres, cache2)
+    return AugmentedReturn(primal, shadow, tape)
 end
 
-function call(f, x)
-    f(x)
-end
+call(f::F, x::T) where {F,T} = f(x)
 
-# Wrapper around a function f that allows it to act as a vector space, and hence be usable as
-# an integrand, where the vector operations act on the closed-over parameters of f that are
-# begin differentiated with respect to.   In particular, if we have a closure f = x -> g(x, p), and we want
-# to differentiate with respect to p, then our reverse (vJp) rule needs an integrand given by the
-# Jacobian-vector product (pullback) vᵀ∂g/∂p.  But Enzyme wraps this in a closure so that it is the
-# same "shape" as f, whereas to integrate it we need to be able to treat it as a vector space.
-# ClosureVector calls Enzyme.Compiler.recursive_add, which is an internal function that "unwraps"
-# the closure to access the internal state, which can then be added/subtracted/scaled.
-struct ClosureVector{F}
-    f::F
-end
+reverse_inner!!(::Const, @nospecialize(args...); @nospecialize(kws...)) = nothing
 
-@inline function guaranteed_nonactive(::Type{T}) where T
-    rt = Enzyme.Compiler.active_reg_inner(T, (), nothing)
-    return rt == Enzyme.Compiler.AnyState || rt == Enzyme.Compiler.DupState
-end
-
-function Base.:+(a::CV, b::CV) where {CV <: ClosureVector}
-    Enzyme.Compiler.recursive_add(a, b, identity, guaranteed_nonactive)::CV
-end
-
-function Base.:-(a::CV, b::CV) where {CV <: ClosureVector}
-    Enzyme.Compiler.recursive_add(a, b, x->-x, guaranteed_nonactive)::CV
-end
-
-function Base.:*(a::Number, b::CV) where {CV <: ClosureVector}
-    # b + (a-1) * b = a * b
-    Enzyme.Compiler.recursive_add(b, b, x->(a-1)*x, guaranteed_nonactive)::CV
-end
-
-function Base.:*(a::ClosureVector, b::Number)
-    return b*a
-end
-
-function Enzyme.EnzymeRules.reverse(config, ofunc::Const{typeof(quadgk)}, dres::Active, cache, f::Union{Const, Active}, segs::Annotation{T}...; kws...) where {T}
-    df = if f isa Const
-        nothing
-    else
-        segbuf = cache[1]
-        fwd, rev = Enzyme.autodiff_thunk(ReverseSplitNoPrimal, Const{typeof(call)}, Active, typeof(f), Const{T})
-        _df, _ = quadgk(map(x->x.val, segs)...; kws..., eval_segbuf=segbuf, maxevals=0, norm=f->0) do x
-            tape, prim, shad = fwd(Const(call), f, Const(x))
-            drev = rev(Const(call), f, Const(x), dres.val[1], tape)
-            return ClosureVector(drev[1][1])
-        end
-        _df.f
+function reverse_inner!!(f::Active, dI, segvals, fwd, rev; kws...)
+    df_VS, _ = quadgk(segvals...; kws...) do x
+        tape, _, _ = fwd(Const(call), f, Const(x))
+        dfx, _ = only(rev(Const(call), f, Const(x), dI, tape))
+        return VectorSpace(dfx; runtime_inactive=Val(false))
     end
-    dsegs1 = segs[1] isa Const ? nothing : -LinearAlgebra.dot(f.val(segs[1].val), dres.val[1])
-    dsegsn = segs[end] isa Const ? nothing : LinearAlgebra.dot(f.val(segs[end].val), dres.val[1])
-    return (df, # f
-            dsegs1,
-            ntuple(i -> nothing, Val(length(segs)-2))...,
-            dsegsn)
+    return df_VS.val
 end
 
-function Enzyme.EnzymeRules.reverse(config, ofunc::Const{typeof(quadgk)}, dres::Type{<:Union{Duplicated, BatchDuplicated}}, cache, f::Union{Const, Active}, segs::Annotation{T}...; kws...) where {T}
-    dres = cache[2]
-    df = if f isa Const
-        nothing
-    else
-        segbuf = cache[1]
-        fwd, rev = Enzyme.autodiff_thunk(ReverseSplitNoPrimal, Const{typeof(call)}, Active, typeof(f), Const{T})
-        _df, _ = quadgk(map(x->x.val, segs)...; kws..., eval_segbuf=segbuf, maxevals=0, norm=f->0) do x
-            tape, prim, shad = fwd(Const(call), f, Const(x))
-            shad .= dres
-            drev = rev(Const(call), f, Const(x), tape)
-            return ClosureVector(drev[1][1])
-        end
-        _df.f
+function reverse_inner!!((; val, dval)::Duplicated, dI, segvals, fwd, rev; kws...)
+    df_VS = VectorSpace(dval; runtime_inactive=Val(false))
+    d_df_VS = similar(df_VS)
+    quadgk!(d_df_VS, segvals...; kws...) do dfx_VS, x
+        dfx = dfx_VS.val
+        make_zero!(dfx; runtime_inactive=Val(false))
+        f = Duplicated(val, dfx)
+        tape, _, _ = fwd(Const(call), f, Const(x))
+        rev(Const(call), f, Const(x), dI, tape)
+        return nothing
     end
-    dsegs1 = segs[1] isa Const ? nothing : -LinearAlgebra.dot(f.val(segs[1].val), dres)
-    dsegsn = segs[end] isa Const ? nothing : LinearAlgebra.dot(f.val(segs[end].val), dres)
-    Enzyme.make_zero!(dres)
-    return (df, # f
-            dsegs1,
-            ntuple(i -> nothing, Val(length(segs)-2))...,
-            dsegsn)
+    df_VS .+= d_df_VS
+    return nothing
 end
+
+function reverse_inner!!((; val, dval)::MixedDuplicated, dI, segvals, fwd, rev; kws...)
+    dfx = Ref(dval[])  # XXX: dfx wouldn't be thread safe, but quadgk isn't threaded so it's OK
+    d_df_VS, _ = quadgk(segvals...; kws...) do x
+        dfx[] = make_zero(dfx[]; runtime_inactive=Val(false))  # NOTE: zero out-of-place to avoid return value aliasing
+        f = MixedDuplicated(val, dfx)
+        tape, _, _ = fwd(Const(call), f, Const(x))
+        rev(Const(call), f, Const(x), dI, tape)
+        return VectorSpace(dfx[]; runtime_inactive=Val(false))
+    end
+    # NOTE: We take care to update all the mutable parts of dval in-place instead of only
+    # updating the outer Ref through something like dval[] = VectorSpace(dval[]) + d_df_VS.
+    # That way, if a user holds their own reference to a part of the shadow, it will be
+    # updated like they may expect.
+    dfx[] = d_df_VS.val  # reduce, reuse, recycle
+    dval_VS = VectorSpace(dval; runtime_inactive=Val(false))
+    dval_VS .+= VectorSpace(dfx; runtime_inactive=Val(false))
+    return nothing
+end
+
+struct ReturnsZero{T} end
+(::ReturnsZero{T})(@nospecialize(x)) where {T} = zero(T)
+
+function EnzymeRules.reverse(
+    config::C,
+    ::Const{typeof(quadgk)},
+    shadow::Active,
+    tape::P,
+    f::Union{Const,Active,Duplicated,MixedDuplicated},
+    segs::Vararg{Annotation{T},N};
+    segbuf=nothing,       # swallow as this wouldn't have the right eltype
+    eval_segbuf=nothing,  # swallow so we're not relying on kw precedence for replacement
+    norm=nothing,
+    maxevals=nothing,
+    kws...,
+) where {C,P,T,N}
+    dI = first(shadow.val)
+    segvals = ntuple(i -> (@inline; segs[i].val), Val(N))
+    thunk = autodiff_thunk(ReverseSplitNoPrimal, Const{typeof(call)}, Active, typeof(f), Const{T})
+    eval_segbuf = first(tape)
+    norm = ReturnsZero{real(typeof(dI))}()
+    df = reverse_inner!!(f, dI, segvals, thunk...; kws..., eval_segbuf, norm, maxevals=0)
+    dseg1 = (segs[1] isa Const) ? nothing : -LinearAlgebra.dot(f.val(segvals[1]), dI)
+    dsegN = (segs[N] isa Const) ? nothing : LinearAlgebra.dot(f.val(segvals[N]), dI)
+    return (df, dseg1, ntuple(_ -> (@inline; nothing), Val(N - 2))..., dsegN)
+end
+
+# function Enzyme.EnzymeRules.reverse(config, ofunc::Const{typeof(quadgk)}, dres::Type{<:Union{Duplicated, BatchDuplicated}}, cache, f::Union{Const, Active}, segs::Annotation{T}...; kws...) where {T}
+#     dres = cache[2]
+#     df = if f isa Const
+#         nothing
+#     else
+#         segbuf = cache[1]
+#         fwd, rev = Enzyme.autodiff_thunk(ReverseSplitNoPrimal, Const{typeof(call)}, Active, typeof(f), Const{T})
+#         _df, _ = quadgk(map(x->x.val, segs)...; kws..., eval_segbuf=segbuf, maxevals=0, norm=f->0) do x
+#             tape, prim, shad = fwd(Const(call), f, Const(x))
+#             shad .= dres
+#             drev = rev(Const(call), f, Const(x), tape)
+#             return ClosureVector(drev[1][1])
+#         end
+#         _df.f
+#     end
+#     dsegs1 = segs[1] isa Const ? nothing : -LinearAlgebra.dot(f.val(segs[1].val), dres)
+#     dsegsn = segs[end] isa Const ? nothing : LinearAlgebra.dot(f.val(segs[end].val), dres)
+#     Enzyme.make_zero!(dres)
+#     return (df, # f
+#             dsegs1,
+#             ntuple(i -> nothing, Val(length(segs)-2))...,
+#             dsegsn)
+# end
 
 end # module
