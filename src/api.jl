@@ -77,8 +77,8 @@ derivatives of the approximate integral).
 quadgk(f, segs...; kws...) =
     quadgk(f, promote(segs...)...; kws...)
 
-function quadgk(f, segs::T...;
-       atol=nothing, rtol=nothing, maxevals=10^7, order=7, norm=norm, segbuf=nothing, eval_segbuf=nothing) where {T}
+function quadgk(f::F, segs::T...;
+       atol=nothing, rtol=nothing, maxevals=10^7, order=7, norm=norm, segbuf=nothing, eval_segbuf=nothing) where {F,T}
     handle_infinities(f, segs) do f, s, _
         do_quadgk(f, s, order, atol, rtol, maxevals, norm, segbuf, eval_segbuf)
     end
