@@ -1,0 +1,9 @@
+[deps]
+ApproxFun = "28f2ccd6-bb30-5033-b560-165f7b14dc2f"
+BenchmarkTools = "6e4b80f9-dd63-53aa-95a3-0cdb28fa8baf"
+Enzyme = "7da242da-08ed-463a-9acd-ee780be4f1d9"
+Profile = "9abbd945-dff8-562f-b5e8-e1ebf5ef1b79"
+ProfileCanvas = "efd6af41-a80b-495e-886c-e51b0c7d77a3"
+ProfileView = "c46f51b8-102a-5cf2-8d2c-8597cb0e0da7"
+QuadGK = "1fd47b50-473d-5c70-9696-f719f8f3bcdc"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
