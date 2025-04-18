@@ -53,7 +53,7 @@ version = "1.6.0"
 deps = ["CEnum", "EnzymeCore", "Enzyme_jll", "GPUCompiler", "LLVM", "Libdl", "LinearAlgebra", "ObjectFile", "PrecompileTools", "Preferences", "Printf", "Random", "SparseArrays"]
 path = "../../Enzyme.jl"
 uuid = "7da242da-08ed-463a-9acd-ee780be4f1d9"
-version = "0.13.28"
+version = "0.13.29"
 
     [deps.Enzyme.extensions]
     EnzymeBFloat16sExt = "BFloat16s"
@@ -98,9 +98,9 @@ uuid = "7b1f6079-737a-58dc-b8bc-7a2ca5c1b5ee"
 
 [[deps.GPUCompiler]]
 deps = ["ExprTools", "InteractiveUtils", "LLVM", "Libdl", "Logging", "PrecompileTools", "Preferences", "Scratch", "Serialization", "TOML", "TimerOutputs", "UUIDs"]
-git-tree-sha1 = "8e30cd0b1934f03dd925416970061c1014c6686f"
+git-tree-sha1 = "f38693a56bffbf30f063568cb18fabda7b9d0516"
 uuid = "61eb1bfa-7361-4325-ad38-22787b887f55"
-version = "1.1.0"
+version = "1.1.1"
 
 [[deps.InteractiveUtils]]
 deps = ["Markdown"]
